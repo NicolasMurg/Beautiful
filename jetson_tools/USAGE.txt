@@ -1,0 +1,54 @@
+Jetson source utilities
+
+This directory publishes the local camera, billiards detection/scoring,
+stereo calibration, JBL audio and sample-layout voice coach utilities.
+Calibration data, captures, recordings, datasets, downloaded model weights,
+virtual environments and private project notes are local runtime assets.
+Existing servo scripts elsewhere in the repository are not called by these tools.
+
+Install source into an existing prepared runtime from the repository root:
+  python3 jetson_tools/install_local_tools.py
+Changed source files are backed up under ~/robot-perception/source-backups.
+The installer does not install dependencies or download models.
+BEAUTIFUL_REPO overrides the checkout path (default ~/Downloads/Beautiful
+when installed). JETSON_RUNTIME_ROOT overrides ~/robot-perception.
+For a different runtime location, pass --runtime-root to the installer and
+set JETSON_RUNTIME_ROOT when running tools.
+
+Run from the installed runtime:
+  bash ~/robot-perception/recalibrate_table_checked.sh
+  bash ~/robot-perception/start_table_alignment.sh --stereo-calibration ~/robot-perception/stereo_calibration_table_checked.npz
+  python3 ~/robot-perception/jbl_speaker_test.py --status
+  python3 ~/robot-perception/run_voice_coach_test.py
+
+Before JBL or voice tests, set JBL_ADDRESS to the paired speaker address from
+Bluetooth Settings, for example export JBL_ADDRESS='AA:BB:CC:DD:EE:FF'.
+
+Checked stereo calibration uses 9x6 inner corners, measured 25.4 mm squares,
+4.25-inch baseline, at least 20 stationary varied views, and five held-out
+distance-check views. These defaults describe the current rig; override flags
+for a different measured setup. Keep focus/mounts fixed and cover near/far/left/
+right areas. A passing checkerboard check still requires independent table fit.
+Table alignment uses center/edge clicks TL/TR/BR/BL with the long axis running
+top-to-bottom in the image. Default playing surface is 223.52x111.76 cm,
+balls 5.715 cm diameter, and ball surfaces 7.62 cm from both adjacent cushions.
+Pocket width default is 11.5 cm. All are measured configuration inputs.
+
+Camera, voice and stereo launchers expect the existing .venv and .venv-ffs
+environments, Fast-FoundationStereo checkout/weights, YOLO checkpoints and
+voice-coach Piper/Whisper assets in the runtime directory. Dataset preparation
+and training scripts require separately obtained local inputs.
+torch-constraints.txt records the existing installation; it is not a generic
+recommended Jetson installation. Use a build compatible with your hardware.
+JBL audio setup requires local sudo authentication for the Bluetooth service
+override; setup_jbl_audio.sh is an explicit setup action, not a test fixture.
+
+Verification from the checkout:
+  ~/robot-perception/.venv/bin/python -m pytest -q jetson_tools
+Hardware smoke scripts test_fast_stereo.py and test_coach_voice.py are excluded
+from pytest collection and must be invoked explicitly in the prepared runtime.
+
+Known limits: table fit is currently rejected by measured dimension checks;
+smooth neural stereo depth does not establish metric accuracy. Full microphone
+to coach advice playback remains awaiting an actual spoken-question trial.
+Automatic scoring is an estimated prototype; physical gameplay is unvalidated.
