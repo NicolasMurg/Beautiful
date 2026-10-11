@@ -1,3 +1,11 @@
 # Private project context. Keep these rules; never commit or force-add these files.
 PROJECT_CONTEXT.txt
 HACKATHON CONTEXT.txt
+
+# Private project context (local only)
+PROJECT_CONTEXT.md
+message (3).txt
+reference_bottle.json
+__pycache__/
+.pytest_cache/
+stereo_calibration.npz

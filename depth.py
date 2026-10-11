@@ -72,8 +72,8 @@ def box_width_m(xyxy, z_m, fx):
     return float(xyxy[2] - xyxy[0]) * z_m / fx
 
 
-def load_fx(path, frame_width=None):
-    """Read fx from calibrate_camera.py output; rescale if the frame width differs."""
+def _load_focal_length(path, axis, frame_pixels=None):
+    """Read a focal length in pixels, accounting for capture resizing."""
     path = Path(path)
     if not path.is_file():
         return None
@@ -81,12 +81,24 @@ def load_fx(path, frame_width=None):
     fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
     try:
         camera_matrix = fs.getNode('camera_matrix').mat()
-        calib_width = fs.getNode('image_width').real()
+        calib_pixels = fs.getNode('image_width' if axis == 0 else 'image_height').real()
     finally:
         fs.release()
-    if camera_matrix is None:
+    if camera_matrix is None or camera_matrix.shape != (3, 3):
         return None
-    fx = float(camera_matrix[0, 0])
-    if frame_width and calib_width:
-        fx *= frame_width / calib_width
-    return fx
+    focal_length = float(camera_matrix[axis, axis])
+    if frame_pixels is not None:
+        if not np.isfinite(calib_pixels) or calib_pixels <= 0 or frame_pixels <= 0:
+            return None
+        focal_length *= frame_pixels / calib_pixels
+    return focal_length if np.isfinite(focal_length) and focal_length > 0 else None
+
+
+def load_fx(path, frame_width=None):
+    """Read horizontal focal length; rescale for the actual frame width."""
+    return _load_focal_length(path, 0, frame_width)
+
+
+def load_fy(path, frame_height=None):
+    """Read vertical focal length; rescale for the actual frame height."""
+    return _load_focal_length(path, 1, frame_height)
