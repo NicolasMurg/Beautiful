@@ -9,3 +9,7 @@ reference_bottle.json
 __pycache__/
 .pytest_cache/
 stereo_calibration.npz
+
+# Local speech runtime and downloaded model weights
+.local/
+models/whisper/

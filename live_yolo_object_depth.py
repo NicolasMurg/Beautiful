@@ -95,7 +95,15 @@ def main():
                         help="Stop after N frames; 0 runs until Q or Ctrl+C")
     parser.add_argument("--no-display", action="store_true",
                         help="Print numerical estimates without opening a window")
+    parser.add_argument("--voice", action="store_true",
+                        help="Enable local Whisper; P records, voice selects a visible object")
+    from speech import add_speech_arguments
+    add_speech_arguments(parser)
     args = parser.parse_args()
+    if args.voice and args.no_display:
+        parser.error("--voice needs the window for push-to-talk; use voice_to_text.py over SSH")
+    if args.voice and not 1 <= args.record_seconds <= 20:
+        parser.error("--record-seconds must be between 1 and 20")
     if not 0 < args.sample_fraction <= 1:
         parser.error("--sample-fraction must be greater than 0 and at most 1")
     if args.frames < 0:
@@ -126,6 +134,7 @@ def main():
     camera = cv2.VideoCapture(source, backend)
     frame_id = 0
     last_report = 0.0
+    voice = None
     try:
         if not camera.isOpened():
             raise RuntimeError(f"Camera {args.camera} could not open")
@@ -134,6 +143,12 @@ def main():
         camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not args.no_display:
             cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+        if args.voice:
+            from speech import VoiceSelection, worker_from_args
+            voice = worker_from_args(args)
+            selection = VoiceSelection(yolo.names.values())
+            print("Whisper runs locally on CPU. Press P, then speak for the recording interval. "
+                  "Voice selects targets only; no servo commands are issued.", flush=True)
         print("Depth is estimated camera-space Z in meters; validate against measured distances.",
               flush=True)
         print("Numerical object records print once per second. Press Q/Esc or Ctrl+C to stop.",
@@ -167,6 +182,13 @@ def main():
             records = object_depth_records(result, depth_map, frame_id,
                                            args.sample_fraction)
             now = time.monotonic()
+            if voice is not None:
+                spoken = voice.poll()
+                if spoken is not None:
+                    selection.apply(spoken, records, now)
+                    print(json.dumps({"speech": spoken.text, "speech_error": spoken.error,
+                                      "selection_status": selection.status,
+                                      "selected_track_id": selection.track_id}), flush=True)
             if frame_id == 1 or now - last_report >= 1.0 or frame_id == args.frames:
                 print(json.dumps({"frame_id": frame_id,
                                   "frame_received_monotonic_s": received_at,
@@ -179,14 +201,22 @@ def main():
                 cv2.putText(annotated, "Estimated object depth | Q/Esc: quit",
                             (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             (255, 255, 255), 1, cv2.LINE_AA)
+                if voice is not None:
+                    selection.draw(annotated, records, voice, cv2)
                 cv2.imshow(WINDOW, annotated)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):
                     break
+                if voice is not None and key in (ord("p"), ord("P")):
+                    if not voice.request():
+                        print("Speech is busy; wait for the current request.", flush=True)
                 if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                     break
     except KeyboardInterrupt:
         print("\nStopped by user.", flush=True)
     finally:
+        if voice is not None:
+            voice.close()
         camera.release()
         if not args.no_display:
             cv2.destroyAllWindows()
