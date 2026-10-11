@@ -148,6 +148,9 @@ class StereoDepthEstimator:
             raise ValueError("Use horizontal stereo with the physical left camera as left input")
         self.geometry = StereoGeometry(float(p1[0, 0]), float(p1[1, 1]),
                                        float(p1[0, 2]), float(p2[0, 2]), baseline_m)
+        # Full rectified intrinsics are needed for metric XYZ/table coordinates,
+        # including the vertical principal point omitted by StereoGeometry.
+        self.rectified_camera_matrix = p1[:, :3].copy()
         self._cv2 = cv2
         self._left_maps = cv2.initUndistortRectifyMap(k1, d1, r1, p1, self.image_size, cv2.CV_32FC1)
         self._right_maps = cv2.initUndistortRectifyMap(k2, d2, r2, p2, self.image_size, cv2.CV_32FC1)

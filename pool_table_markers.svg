@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="180mm" viewBox="0 0 210 180">
+  <title>Four textured stereo table reference markers</title>
+  <desc>Four black and white, 35 millimeter square aperiodic checker patches, labeled TL, TR, BR, BL outside their patterns. Print at actual size.</desc>
+  <rect width="210" height="180" fill="white"/>
+  <g fill="black" font-family="sans-serif" text-anchor="middle">
+    <text x="105" y="10" font-size="5">Stereo table reference markers</text>
+    <text x="105" y="17" font-size="3.5">Print at 100% / actual size. Each patterned square is 35 mm.</text>
+  </g>
+  <g id="marker-TL">
+    <rect x="35" y="25" width="35" height="35" fill="white" stroke="black" stroke-width="0.2"/>
+    <rect x="35" y="25" width="5" height="5" fill="black"/>
+    <rect x="45" y="25" width="5" height="5" fill="black"/>
+    <rect x="55" y="25" width="5" height="5" fill="black"/>
+    <rect x="60" y="25" width="5" height="5" fill="black"/>
+    <rect x="40" y="30" width="5" height="5" fill="black"/>
+    <rect x="50" y="30" width="5" height="5" fill="black"/>
+    <rect x="60" y="30" width="5" height="5" fill="black"/>
+    <rect x="65" y="30" width="5" height="5" fill="black"/>
+    <rect x="35" y="35" width="5" height="5" fill="black"/>
+    <rect x="45" y="35" width="5" height="5" fill="black"/>
+    <rect x="55" y="35" width="5" height="5" fill="black"/>
+    <rect x="65" y="35" width="5" height="5" fill="black"/>
+    <rect x="35" y="40" width="5" height="5" fill="black"/>
+    <rect x="40" y="40" width="5" height="5" fill="black"/>
+    <rect x="50" y="40" width="5" height="5" fill="black"/>
+    <rect x="60" y="40" width="5" height="5" fill="black"/>
+    <rect x="45" y="45" width="5" height="5" fill="black"/>
+    <rect x="55" y="45" width="5" height="5" fill="black"/>
+    <rect x="60" y="45" width="5" height="5" fill="black"/>
+    <rect x="65" y="45" width="5" height="5" fill="black"/>
+    <rect x="40" y="50" width="5" height="5" fill="black"/>
+    <rect x="50" y="50" width="5" height="5" fill="black"/>
+    <rect x="35" y="55" width="5" height="5" fill="black"/>
+    <rect x="45" y="55" width="5" height="5" fill="black"/>
+    <rect x="55" y="55" width="5" height="5" fill="black"/>
+    <rect x="65" y="55" width="5" height="5" fill="black"/>
+    <text x="52.5" y="68" font-family="sans-serif" text-anchor="middle" font-size="6" fill="black">TL</text>
+    <text x="52.5" y="74" font-family="sans-serif" text-anchor="middle" font-size="3" fill="black">Reference: center of patterned square</text>
+  </g>
+  <g id="marker-TR">
+    <rect x="130" y="25" width="35" height="35" fill="white" stroke="black" stroke-width="0.2"/>
+    <rect x="130" y="25" width="5" height="5" fill="black"/>
+    <rect x="135" y="25" width="5" height="5" fill="black"/>
+    <rect x="150" y="25" width="5" height="5" fill="black"/>
+    <rect x="160" y="25" width="5" height="5" fill="black"/>
+    <rect x="135" y="30" width="5" height="5" fill="black"/>
+    <rect x="145" y="30" width="5" height="5" fill="black"/>
+    <rect x="155" y="30" width="5" height="5" fill="black"/>
+    <rect x="130" y="35" width="5" height="5" fill="black"/>
+    <rect x="140" y="35" width="5" height="5" fill="black"/>
+    <rect x="145" y="35" width="5" height="5" fill="black"/>
+    <rect x="150" y="35" width="5" height="5" fill="black"/>
+    <rect x="135" y="40" width="5" height="5" fill="black"/>
+    <rect x="145" y="40" width="5" height="5" fill="black"/>
+    <rect x="155" y="40" width="5" height="5" fill="black"/>
+    <rect x="160" y="40" width="5" height="5" fill="black"/>
+    <rect x="130" y="45" width="5" height="5" fill="black"/>
+    <rect x="140" y="45" width="5" height="5" fill="black"/>
+    <rect x="155" y="45" width="5" height="5" fill="black"/>
+    <rect x="135" y="50" width="5" height="5" fill="black"/>
+    <rect x="145" y="50" width="5" height="5" fill="black"/>
+    <rect x="150" y="50" width="5" height="5" fill="black"/>
+    <rect x="160" y="50" width="5" height="5" fill="black"/>
+    <rect x="140" y="55" width="5" height="5" fill="black"/>
+    <rect x="150" y="55" width="5" height="5" fill="black"/>
+    <rect x="160" y="55" width="5" height="5" fill="black"/>
+    <text x="147.5" y="68" font-family="sans-serif" text-anchor="middle" font-size="6" fill="black">TR</text>
+    <text x="147.5" y="74" font-family="sans-serif" text-anchor="middle" font-size="3" fill="black">Reference: center of patterned square</text>
+  </g>
+  <g id="marker-BR">
+    <rect x="130" y="100" width="35" height="35" fill="white" stroke="black" stroke-width="0.2"/>
+    <rect x="130" y="100" width="5" height="5" fill="black"/>
+    <rect x="140" y="100" width="5" height="5" fill="black"/>
+    <rect x="150" y="100" width="5" height="5" fill="black"/>
+    <rect x="160" y="100" width="5" height="5" fill="black"/>
+    <rect x="140" y="105" width="5" height="5" fill="black"/>
+    <rect x="145" y="105" width="5" height="5" fill="black"/>
+    <rect x="155" y="105" width="5" height="5" fill="black"/>
+    <rect x="130" y="110" width="5" height="5" fill="black"/>
+    <rect x="135" y="110" width="5" height="5" fill="black"/>
+    <rect x="150" y="110" width="5" height="5" fill="black"/>
+    <rect x="160" y="110" width="5" height="5" fill="black"/>
+    <rect x="135" y="115" width="5" height="5" fill="black"/>
+    <rect x="145" y="115" width="5" height="5" fill="black"/>
+    <rect x="150" y="115" width="5" height="5" fill="black"/>
+    <rect x="130" y="120" width="5" height="5" fill="black"/>
+    <rect x="140" y="120" width="5" height="5" fill="black"/>
+    <rect x="155" y="120" width="5" height="5" fill="black"/>
+    <rect x="160" y="120" width="5" height="5" fill="black"/>
+    <rect x="135" y="125" width="5" height="5" fill="black"/>
+    <rect x="145" y="125" width="5" height="5" fill="black"/>
+    <rect x="155" y="125" width="5" height="5" fill="black"/>
+    <rect x="130" y="130" width="5" height="5" fill="black"/>
+    <rect x="135" y="130" width="5" height="5" fill="black"/>
+    <rect x="150" y="130" width="5" height="5" fill="black"/>
+    <rect x="160" y="130" width="5" height="5" fill="black"/>
+    <text x="147.5" y="143" font-family="sans-serif" text-anchor="middle" font-size="6" fill="black">BR</text>
+    <text x="147.5" y="149" font-family="sans-serif" text-anchor="middle" font-size="3" fill="black">Reference: center of patterned square</text>
+  </g>
+  <g id="marker-BL">
+    <rect x="35" y="100" width="35" height="35" fill="white" stroke="black" stroke-width="0.2"/>
+    <rect x="35" y="100" width="5" height="5" fill="black"/>
+    <rect x="45" y="100" width="5" height="5" fill="black"/>
+    <rect x="50" y="100" width="5" height="5" fill="black"/>
+    <rect x="65" y="100" width="5" height="5" fill="black"/>
+    <rect x="40" y="105" width="5" height="5" fill="black"/>
+    <rect x="50" y="105" width="5" height="5" fill="black"/>
+    <rect x="60" y="105" width="5" height="5" fill="black"/>
+    <rect x="35" y="110" width="5" height="5" fill="black"/>
+    <rect x="45" y="110" width="5" height="5" fill="black"/>
+    <rect x="55" y="110" width="5" height="5" fill="black"/>
+    <rect x="60" y="110" width="5" height="5" fill="black"/>
+    <rect x="65" y="110" width="5" height="5" fill="black"/>
+    <rect x="50" y="115" width="5" height="5" fill="black"/>
+    <rect x="60" y="115" width="5" height="5" fill="black"/>
+    <rect x="35" y="120" width="5" height="5" fill="black"/>
+    <rect x="45" y="120" width="5" height="5" fill="black"/>
+    <rect x="50" y="120" width="5" height="5" fill="black"/>
+    <rect x="55" y="120" width="5" height="5" fill="black"/>
+    <rect x="65" y="120" width="5" height="5" fill="black"/>
+    <rect x="40" y="125" width="5" height="5" fill="black"/>
+    <rect x="50" y="125" width="5" height="5" fill="black"/>
+    <rect x="35" y="130" width="5" height="5" fill="black"/>
+    <rect x="45" y="130" width="5" height="5" fill="black"/>
+    <rect x="55" y="130" width="5" height="5" fill="black"/>
+    <rect x="65" y="130" width="5" height="5" fill="black"/>
+    <text x="52.5" y="143" font-family="sans-serif" text-anchor="middle" font-size="6" fill="black">BL</text>
+    <text x="52.5" y="149" font-family="sans-serif" text-anchor="middle" font-size="3" fill="black">Reference: center of patterned square</text>
+  </g>
+  <path d="M 80 163 V 169 M 80 166 H 130 M 130 163 V 169" fill="none" stroke="black" stroke-width="0.4"/>
+  <text x="105" y="175" font-family="sans-serif" text-anchor="middle" font-size="3.5" fill="black">Scale check: this line is 50 mm</text>
+</svg>
