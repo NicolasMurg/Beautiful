@@ -5,11 +5,14 @@ A scan is invalidated on scene motion, capture failure, or stale frames.
 """
 
 import math
+import copy
+import re
 import time
 
 import numpy as np
 
 from billiards import BALLS, GROUPS, plan_shots
+from billiards_map import build_table_map, planner_state_from_map
 
 
 class SceneGuard:
@@ -41,18 +44,29 @@ class SceneGuard:
 
 
 class PoolSession:
-    """One explicitly reviewed stationary layout, tied to fresh camera frames."""
+    """One reviewed stationary layout with an optional default target filter.
 
-    def __init__(self, calibration, detector, group="solids", max_frame_age=3.0):
+    Solids/stripes requests filter this snapshot; they do not assign a player a
+    group or update a game history.
+    """
+
+    def __init__(self, calibration, detector, group="open", max_frame_age=3.0,
+                 planner_options=None):
         if group not in GROUPS:
             raise ValueError("Choose solids, stripes, or open.")
+        if not isinstance(max_frame_age, (int, float)) or not math.isfinite(max_frame_age) or max_frame_age <= 0:
+            raise ValueError("Frame age must be finite and positive.")
         self.calibration, self.detector, self.group = calibration, detector, group
+        self.planner_options = dict(planner_options or {})
+        self.pocket_overrides = {}
         self.guard = SceneGuard(calibration.polygon, calibration.image_size)
         self.max_frame_age = max_frame_age
         self.revision = 0
         self.snapshot = None
+        self.scan_received_at = None
         self.depth_snapshot = None
         self.candidates = []
+        self.parts = []
         self.labels = {}
         self.ignored = set()
         self.confirmed = False
@@ -66,8 +80,10 @@ class PoolSession:
 
     def invalidate(self, message):
         self.snapshot = None
+        self.scan_received_at = None
         self.depth_snapshot = None
         self.candidates = []
+        self.parts = []
         self.labels.clear()
         self.ignored.clear()
         self.confirmed = False
@@ -102,6 +118,10 @@ class PoolSession:
                     previous = candidate["position"]
                     if math.hypot(current["x"] - previous["x"], current["y"] - previous["y"]) > 1.0:
                         raise ValueError("Measured ball position changed by over 1 cm.")
+                    if (current.get("position_uncertainty_cm", 0) >
+                            previous.get("position_uncertainty_cm", 0)
+                            + max(0.1, self.calibration.ball_radius_cm * 0.1)):
+                        raise ValueError("Ball position uncertainty increased; review a new scan.")
                 except ValueError as exc:
                     self.invalidate(f"Stereo ball measurement changed: {exc} SPACE to rescan.")
                     self.previous = None
@@ -128,9 +148,15 @@ class PoolSession:
             self.stable_since = None
             self.stable_frames = 0
             raise ValueError(self.message)
-        detections = self.detector.detect(frame, self.calibration.polygon)
+        if hasattr(self.detector, "detect_scene"):
+            scene = self.detector.detect_scene(frame, self.calibration.polygon)
+            detections, parts = scene["balls"], scene["parts"]
+        else:
+            detections, parts = self.detector.detect(frame, self.calibration.polygon), []
         self.invalidate("Scan ready. Review every ball number; SHIFT-click to add a missed ball.")
+        self.parts = parts
         self.snapshot, self.depth_snapshot = frame.copy(), depth_map.copy()
+        self.scan_received_at = self.last_received
         for detection in detections:
             self._append(detection)
         if not self.candidates:
@@ -196,6 +222,34 @@ class PoolSession:
         self.confirmed, self.plan = False, None
         self.revision += 1
 
+    def accept_model_labels(self):
+        """Copy unique model identity suggestions for review; never confirm a layout."""
+        active = [c for c in self.candidates if c["key"] not in self.ignored]
+        if self.snapshot is None:
+            raise ValueError("SPACE to scan before reviewing model labels.")
+        suggested = [c.get("model_suggested_id") for c in active]
+        used = set(self.labels.values())
+        accepted = 0
+        for candidate in active:
+            number = candidate.get("model_suggested_id")
+            if (number is None or number not in BALLS or candidate.get("identity_conflict")
+                    or "error" in candidate or candidate["key"] in self.labels
+                    or suggested.count(number) != 1 or number in used):
+                continue
+            self.assign(candidate["key"], number)
+            used.add(number)
+            accepted += 1
+        self.message = (f"Copied {accepted} unique model labels. Review every ball and press C; "
+                        "unidentified or conflicting candidates still need labels.")
+        return accepted
+
+    def set_pocket_blocked(self, pocket_id, blocked):
+        if pocket_id not in ("TL", "TM", "TR", "BL", "BM", "BR") or not isinstance(blocked, bool):
+            raise ValueError("Use pocket TL, TM, TR, BL, BM, or BR and a boolean blocked state.")
+        self.pocket_overrides[pocket_id] = blocked
+        self.plan = None
+        self.revision += 1
+
     def reject(self, key):
         self.candidate(key)
         self.ignored.add(str(key))
@@ -204,44 +258,77 @@ class PoolSession:
         self.revision += 1
         self.message = "Candidate ignored. Confirm that no real ball is missing before C."
 
+    def virtual_map(self):
+        """The measured overhead map shown to the operator and used by planning."""
+        table = copy.deepcopy(self.calibration.table)
+        if self.pocket_overrides:
+            pockets = {p["id"]: dict(p) for p in table.get("pockets", [])}
+            for pocket_id, blocked in self.pocket_overrides.items():
+                pockets.setdefault(pocket_id, {"id": pocket_id})["blocked"] = blocked
+            table["pockets"] = list(pockets.values())
+        result = build_table_map(table, self.candidates, self.labels, self.ignored,
+                                 confirmed=self.confirmed, observed_at=self.scan_received_at)
+        result["last_validated_at"] = self.last_received
+        result["calibration_signature"] = copy.deepcopy(getattr(self.calibration, "signature", None))
+        return result
+
     def state(self):
-        active = [c for c in self.candidates if c["key"] not in self.ignored]
-        if self.snapshot is None or not active:
+        if self.snapshot is None or not any(c["key"] not in self.ignored for c in self.candidates):
             raise ValueError("SPACE to scan the physical table first.")
-        for candidate in active:
-            if "error" in candidate:
-                raise ValueError(f"Candidate {candidate['key']}: {candidate['error']}")
-            if candidate["key"] not in self.labels:
-                raise ValueError(f"Label candidate {candidate['key']} with its actual ball number.")
-        return dict(table=self.calibration.table, group=self.group,
-                    balls=[dict(id=self.labels[c["key"]], x=c["position"]["x"],
-                                y=c["position"]["y"]) for c in active])
+        # Confirmation validates this state before declaring it reviewed. ask()
+        # separately enforces review and fresh frames before issuing advice.
+        return planner_state_from_map(self.virtual_map(), self.group, self.planner_options,
+                                      require_confirmed=False)
 
     def confirm(self):
-        # Missing balls are not inferred pocketed by the detector. This action is
-        # an explicit operator declaration that all on-table balls are represented.
+        # Review describes only the current geometry: every on-table ball must
+        # be represented, including balls that block paths. Missing IDs say
+        # nothing about pocket events or which group a player owns.
         plan_shots(self.state())  # Validate complete observed geometry and cue identity.
         self.confirmed = True
         self.revision += 1
-        self.message = "Layout confirmed: all on-table balls labeled; absent numbers are pocketed. A: ask."
+        self.message = "Layout confirmed: all on-table balls labeled. A: ask for solids or stripes."
 
     def set_group(self, group):
+        """Set the optional default target filter, without assigning a player."""
         if group not in GROUPS:
             raise ValueError("Choose solids, stripes, or open.")
         self.group = group
         self.plan = None
         self.revision += 1
-        self.message = f"Playing {group}. A: ask for the best direct shot."
+        self.message = f"Target filter: {group}. A: ask for the best shot."
 
     def ask(self, question="What is my best shot?", now=None):
+        if not isinstance(question, str) or len(question) > 500:
+            raise ValueError("Use a shot request containing at most 500 characters.")
         now = time.monotonic() if now is None else now
         if self.last_received is None or not 0 <= now - self.last_received <= self.max_frame_age:
             self.invalidate("Camera frames are stale. Rescan before asking for a shot.")
             raise ValueError(self.message)
         if not self.confirmed:
             raise ValueError("Review the real balls and press C to confirm the complete layout first.")
+        command = re.sub(r"[?.!]+$", "", question.strip().lower())
+        if command in ("next", "next shot", "next option", "another shot", "show another shot") and self.plan:
+            shot = self.next_shot()
+            return dict(self.plan, response=shot["instruction"] if shot else self.plan["message"])
+        if command in ("why", "why this shot", "explain", "explain this shot", "repeat", "repeat shot") and self.shot:
+            text = self.shot["instruction"]
+            if command not in ("repeat", "repeat shot"):
+                text += " " + " ".join(self.shot["reasons"])
+            return dict(self.plan, response=text)
+        pocket = re.fullmatch(r"(block|unblock|open) (?:the )?(tl|tm|tr|bl|bm|br|top left|top middle|top right|bottom left|bottom middle|bottom right)(?: pocket| hole)?", command)
+        if pocket:
+            names = {"top left": "TL", "top middle": "TM", "top right": "TR",
+                     "bottom left": "BL", "bottom middle": "BM", "bottom right": "BR"}
+            pocket_id = names.get(pocket[2], pocket[2].upper())
+            self.set_pocket_blocked(pocket_id, pocket[1] == "block")
+            question = "What is my best shot?"
+        if command in ("direct shots only", "disable bank shots", "allow bank shots", "include bank shots"):
+            self.planner_options["allow_banks"] = command in ("allow bank shots", "include bank shots")
+            self.plan = None
+            self.revision += 1
+            question = "What is my best shot?"
         result = plan_shots(self.state(), question)
-        self.group = result["group"]
         self.plan = result
         self.shot_index = 0
         self.revision += 1
@@ -257,4 +344,5 @@ class PoolSession:
     def next_shot(self):
         if self.plan and self.plan.get("shots"):
             self.shot_index = (self.shot_index + 1) % len(self.plan["shots"])
+            self.revision += 1
         return self.shot

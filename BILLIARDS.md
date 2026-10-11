@@ -1,14 +1,64 @@
 # Camera-based billiards shot adviser
 
 `live_billiards.py` uses the existing calibrated stereo cameras to observe a real
-table and suggest a direct pot from a reviewed, stationary ball layout. The
-OpenCV window shows the actual camera image, detected balls, and calculated aim
-lines. No browser, generated table layout, cloud service, or language model is
-required.
+table and rank direct pots and one-cushion object-ball banks from a reviewed,
+stationary ball layout. The
+OpenCV window shows the camera image or a reconstructed overhead metric map,
+detected balls, and calculated aim lines. No browser, invented ball layout, cloud
+service, or language model is required.
 
 This version advises a shot before you play. It does not track balls through a
-high-speed break, simulate spin, or guarantee a pot. Motion invalidates the old
+high-speed break, simulate arbitrary spin, or guarantee a pot. Motion invalidates the old
 advice so you can scan and review the next layout.
+
+## Measurements become a virtual table before planning
+
+For separate alignment, measurement capture, and map-export commands, see
+[the standalone table workflow](TABLE_WORKFLOW.md). Its saved profile also works
+with this live adviser.
+
+The processing stages are explicit:
+
+```text
+Object image position + calibrated camera distance
+    -> 3D position in the calibrated camera frame
+    -> physical x/y coordinates on the table in centimeters
+    -> virtual map of balls, pocket mouths, and cushion segments
+    -> reviewed map -> candidates for the requested balls -> ranked advice
+```
+
+`billiards_table.py` performs the coordinate conversion. `billiards_map.py`
+builds the world map, preserves measurement provenance and uncertainty, and
+provides the planner's state. `billiards_map_view.py` draws that same map from
+above with a uniform physical scale. The planner does not use camera distance
+as if it were a ball's position on the felt.
+
+Press **M** to toggle camera/map view, or start with `--map-view`. The map shows
+the table dimensions, centimeter grid, ball identities, position uncertainty,
+pocket openings and blocked flags, and the selected shot paths after confirmation.
+Switch back to the camera to label detections or mark a missed real ball. No map
+control lets you invent or drag a ball to a preferred position. Motion, rejected
+capture, or unusable depth invalidates both the map's guidance and the shot.
+
+Distance alone is insufficient: two balls equally far from a camera can be far
+apart from each other. Each ball also needs its image position and matching
+camera intrinsics. These give 3D positions in the camera frame and therefore
+ball-to-ball spacing, without needing the camera's height or distance behind the
+table edge. A camera mounted to the side can work; visibility and depth accuracy
+still need checking across the whole table.
+
+Placing those balls relative to cushions and pockets additionally needs the
+camera-to-table pose. The four-marker alignment below estimates it; you do not
+need to measure the camera's setback from the table edge. Pocket recognition is
+not required: measured table dimensions, corner alignment, and pocket openings
+define the six-pocket geometry. Without either measured or reliably detected
+pocket locations, the system cannot recommend a pot.
+
+Current stereo measurements are optical-axis Z in
+meters, sampled at the visible ball surface. An explicit scalar-measurement API
+also supports straight-line range and center-distance measurements without
+confusing those conventions. See [BILLIARDS_MAP.md](BILLIARDS_MAP.md) for the
+input contract and coordinate math.
 
 ## What to prepare
 
@@ -120,13 +170,13 @@ If the cameras move relative to one another, redo stereo calibration first.
 4. **Shift-click** a missed ball's center to add a candidate from a real pixel
    with observed stereo depth. Right-click a false candidate to reject it.
    **Delete** clears the selected candidate's label.
-5. Select the appropriate group with **G**: solids, stripes, or open table.
-6. Press **C** only after every visible ball has the correct identity and all
-   absent IDs really are already pocketed. This is the operator's confirmation
-   of the table state. If a ball is hidden or off-camera, uncover it or change
-   the view before confirming; absence from detection does not establish that
-   it was pocketed.
-7. Press **A** for the best available direct pot, or **N** for the next
+5. Optionally choose a default target filter with **G**: solids, stripes, or
+   open (all ordinary numbered balls). You can specify a group in each request.
+6. Press **C** only after every ball currently on the table is represented with
+   the correct identity. If a ball is hidden or off-camera, uncover it or change
+   the view before confirming so it is included as a possible obstruction.
+   Confirmation records a complete physical snapshot, not any ball's history.
+7. Press **A** for the best available modeled shot, or **N** for the next
    alternative. Press **?**, type a supported shot question, and press **Enter**.
    You can also enter a plain question in the terminal while the app runs.
 
@@ -135,10 +185,25 @@ requests about a selected ball or group. It is not an open-ended conversational
 model. Ball identities come from the reviewed camera observation, not from a
 spoken request inventing or moving a ball.
 
-Examples include `What is my best shot?`, `I am stripes, what should I shoot?`,
-`Where should I aim for ball 10?`, and `Aim for the red solid`. The request must
-agree with the confirmed layout and legal target group. A color alone is
-ambiguous on an open table because both a solid and a stripe share that color.
+Examples include `What is my best shot?`, `Best shot for stripes`,
+`Best shot for solids`, `Where should I aim for ball 10?`, and `Aim for the red
+solid`. Each group request filters targets in the same current layout; it does
+not assign a group to a player or change the default filter. Balls outside the
+requested group remain obstructions. A color alone is ambiguous with the open
+filter because both a solid and a stripe share that color.
+
+The adviser does not track pocketed balls, turns, or player ownership. If no balls
+from the requested group are present, it returns `no_shot`; it never automatically
+switches to the eight ball. An explicit request for ball 8 evaluates its geometry
+without deciding whether playing it is allowed under the match rules.
+
+Additional typed and spoken commands include `Best bank shot`, `Best direct shot`,
+`Next shot`, `Why this shot?`, `Repeat shot`, `Direct shots only`, and
+`Allow bank shots`. `Block the top middle pocket` (or `Block TM`) excludes a
+temporarily unusable pocket; `Unblock TM` restores it. These pocket flags persist
+through rescans within the current session. Ordinary ball obstructions are
+calculated from their measured positions without needing a block command.
+Commands never override the fresh-frame and reviewed-layout requirements.
 
 ### Controls
 
@@ -150,10 +215,12 @@ ambiguous on an open table because both a solid and a stripe share that color.
 | **Shift-click** | Add a missed ball at a real camera pixel with valid depth |
 | Right-click | Reject a false candidate |
 | **Delete** | Clear the selected ball's label |
+| **L** | Copy unique custom-model ball labels, then review them before C |
 | **C** | Confirm the complete reviewed table state |
-| **G** | Cycle solids, stripes, and open-table selection |
-| **A** | Request the best direct-pot candidate |
+| **G** | Cycle the default target filter: solids, stripes, or open |
+| **A** | Request the best modeled direct or bank candidate |
 | **N** | Show the next alternative |
+| **M** | Toggle live camera and the measured overhead table map |
 | **?**, text, **Enter** | Ask using the camera window |
 | **P** | Record a spoken question when started with `--voice` |
 | **Esc** | Cancel text entry; quit when not entering text |
@@ -166,15 +233,19 @@ previous ball labels are not trusted through collisions or occlusion.
 
 ## What the overlay means
 
-The adviser ranks legal direct-pot candidates from the confirmed state using
-geometric difficulty and path clearance. The displayed best candidate is the
-best under that scoring model, not a guaranteed optimal move in a full game.
+The adviser ranks direct pots and one-cushion object-ball banks for the requested
+targets from the confirmed state. It checks cue and object paths against all observed balls,
+their supplied position uncertainty, cushion segments, and pocket jaws. A bank
+must rebound from a real cushion segment, away from pocket openings. The displayed
+best candidate is the best under this finite search and scoring model, not a
+guaranteed optimal move in a full game.
 The overlay identifies the target ball and pocket and draws:
 
 - The ideal ghost-ball center: where the cue ball's center would be at contact
   for an ideal collision sending the object ball toward that pocket.
-- The cue ball's path toward the ghost-ball center and the object ball's path
-  toward the pocket.
+- The cue ball's path toward the ghost-ball center and every leg of the object
+  ball's path toward the pocket, including the rebound point for a bank.
+- Purple dashed cue-ball continuation under the conditional stun model.
 - The **aim angle**, measured clockwise from table-right in the chosen table
   coordinate system, separately from the **cut angle**, which describes the
   change between the incoming cue-ball direction and outgoing object-ball
@@ -183,11 +254,76 @@ The overlay identifies the target ball and pocket and draws:
   coordinate: 0–8 along a long side from the left, and 0–4 along a short side
   from the top, using the chosen table orientation.
 
-The cushion-line intersection is a reference for aiming. It is not a bank-shot
-instruction, the predicted cushion contact of the cue ball, or necessarily the
-position of a physical diamond embedded in the outside rail. The model does not
-account for spin, throw, cloth speed, cushion rebounds, or the cue ball's full
-motion after contact.
+The dashed cushion-line intersection is a reference for aiming, separate from
+the object ball's bank point. It is not necessarily the position of a physical
+diamond embedded in the outside rail.
+
+Ranking considers cut angle, cue/object travel, remaining clearance, pocket
+margin, bank difficulty, detection quality, position uncertainty, required pace,
+and a conditional scratch estimate. JSON output includes the score penalties,
+reasons, and counts of rejected candidates. Scores are not calibrated make odds.
+
+The scratch estimate assumes an ideal **stun impact** and a simple cloth-drag
+model. It traces cue-ball motion until a stop, scratch, another ball, uncertain
+pocket jaw, or a bounded number of cushion contacts. Unknown outcomes are marked
+unknown and penalized. A low estimate does not establish that a follow/draw stroke
+is safe. Soft/medium/firm pace and numerical speed are model estimates that need
+physical calibration. The search does not yet include combinations, cue-ball
+kicks, jumps, spin/throw, defensive shots, or planning multiple shots ahead. When
+no modeled route is available, it returns `no_shot` with rejection diagnostics.
+
+Balls hanging inside a pocket mouth remain targets and blockers when their
+centers are still inside the measured table rectangle and clear the actual
+cushion segments. Centers on the unmeasured shelf beyond that rectangle require
+operator review; the system does not invent shelf geometry.
+
+### Measured pockets and planner settings
+
+Default pockets are the four corners and two long-rail midpoints. To supply
+individual opening widths, a shifted side-pocket location, or a blocked pocket,
+save a JSON list under `.local/billiards/pockets.json` and add
+`--pockets-config .local/billiards/pockets.json`:
+
+```json
+[
+  {"id": "TM", "x": 126.5, "width": 12.0},
+  {"id": "BR", "width": 11.0, "blocked": true}
+]
+```
+
+Those are example measurements for a 254 cm table; replace them with your own.
+All coordinates and lengths are centimetres. IDs are `TL`, `TM`, `TR`, `BL`, `BM`,
+`BR`. Unspecified fields use the table's defaults. Corner centers remain at the
+cushion intersections; `TM` and `BM` may move along their respective long rails.
+Overlapping openings, off-rail centers, and openings narrower than a ball are
+rejected. Configured pockets are saved with the table profile and used on later
+runs; an empty list restores the standard geometry. YOLO pocket boxes remain
+visual review hints and never silently replace measured geometry.
+
+Local ball uncertainty combines calibration residuals, depth spread, and a
+one-pixel localization tolerance. This is an engineering margin, not a statistical
+confidence interval or complete model of systematic camera error. Use
+`--position-margin-cm 0.2` to add an additional measured error allowance, and
+`--direct-only` to start without bank candidates.
+
+Optional `--planner-config .local/billiards/planner.json` accepts:
+
+```json
+{
+  "allow_banks": true,
+  "max_cut_angle_deg": 80,
+  "rolling_deceleration_cm_s2": 20,
+  "cushion_restitution": 0.8,
+  "pocket_entry_speed_cm_s": 22.86,
+  "position_uncertainty_cm": 0.2
+}
+```
+
+The drag, restitution, and entry speed above are example assumptions, not measured
+properties of your table. Calibrate them from actual rolling/rebound observations
+before relying on numerical speed or stopping distance. Changing table/ball size
+requires new geometry and checking these dynamics as well. Command-line margin
+and direct-only options override the corresponding JSON settings.
 
 ## Detection and optional YOLO
 
@@ -197,10 +333,21 @@ bounds and good framing matter: adjacent balls, reflections, shadows, and small
 ball images can cause missed or extra candidates. Review the result before
 asking for a shot.
 
-Add `--model yolo26n.pt` to supplement these proposals using existing local
+Add `--model path/to/best.pt` to supplement these proposals using existing local
 Ultralytics weights. Generic COCO weights know the `sports ball` class; they do
-not recognize pool-ball numbers. Standard color/stripe heuristics can suggest
-numbers but never confirm them. The operator's labels establish identity.
+not recognize pool-ball numbers. Custom labels such as `cue_ball`, `ball_1`, and
+`ball_15` can supply number suggestions. For a different model vocabulary, pass
+`--class-map .local/billiards/classes.json`, a JSON object such as
+`{"white_cue": 0, "nine_ball": 9, "17": 8}`. Numeric keys are model class
+indices; their values are actual ball IDs, not inferred COCO IDs.
+
+Use `--yolo-confidence 0.5` to change the detection threshold. Overlapping boxes
+with contradictory identities stay unconfirmed. **L** copies unique model label
+suggestions into the review; it skips conflicts, repeated numbers, and candidates
+without valid depth. Appearance-only color guesses are never bulk-accepted.
+Review the copied labels and all missing balls before **C**. Model detections of
+pockets, rails, table, and cue sticks appear as unconfirmed review hints when the
+weights contain those classes. This code does not train or supply custom weights.
 
 Use `python3 live_billiards.py --help` for the available detector and capture
 options. Keep using the Jetson's working GPU environment rather than replacing
@@ -242,10 +389,15 @@ For a first table session:
    direct pot is offered, including a no-shot result when appropriate.
 4. Move a ball after confirmation and check that the old recommendation clears.
    Also check a missed ball, a false detection, and unavailable stereo depth.
-5. Test the selected group and an eight-ball-only situation against the actual
-   game state. Continue to apply the rules used for your match.
+5. Ask for solids and then stripes from the same snapshot. Check that each
+   request selects the intended targets while all other balls remain obstacles.
 6. Attempt repeated, simple shots and record observed results separately from
    the geometry checks. Keep the rig unchanged between comparisons.
+
+Also test an unobstructed bank, a ball blocking each bank leg, a pocket marked
+blocked, a narrow pocket, and an intended bank point over a pocket opening. Compare
+scratch warnings with real cue-ball behavior at several speeds. Repeat with the
+table's measured uncertainty margin rather than judging nominal lines alone.
 
 For a portable demo, physical miniature balls and a measured miniature table
 can use this same camera application after calibration. Enter their actual ball
@@ -258,7 +410,42 @@ The stereo coordinates follow the rectification and triangulation conventions
 in [OpenCV's calibration documentation](https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html).
 For the ideal collision geometry behind ghost-ball aiming, see
 [David Alciatore's pool physics article](https://drdavepoolinfo.com/physics_articles/Alciatore_pool_physics_article.pdf).
-Target-group and eight-ball eligibility use a limited subset of the
-[WPA rules](https://wpapool.com/wp-content/uploads/2026/01/2026.01.02-WPA-Rules.pdf).
-The app does not adjudicate a full match, called-shot compliance, break rules,
-fouls, or scratches; use the rules agreed for your game.
+The bank model uses the [mirror aiming construction](https://drdavepoolinfo.com/faq/bank-kick/mirror/);
+real speed and spin require adjustments. Conditional cue continuation follows
+the [stun tangent-line model](https://drdavepoolinfo.com/faq/stun/shot/).
+Target groups are request filters only. The app does not adjudicate a match,
+assign player groups, infer pocketing history, or decide eight-ball eligibility;
+the player remains responsible for the rules used for the game.
+
+## Export and replay observed layouts
+
+Add `--export-state .local/billiards/latest.json` to the live command. Every **C**
+confirmation atomically saves the reviewed geometry, ball IDs, uncertainty,
+confidence, current planner settings, and a `virtual_map` snapshot with camera
+measurement provenance. This is a historical snapshot; it is
+never automatically trusted as a current camera observation.
+
+Run the same planner without cameras, OpenCV, or model packages:
+
+```bash
+python3 plan_billiards.py --state .local/billiards/latest.json --confirmed
+python3 plan_billiards.py --state .local/billiards/latest.json --confirmed --question "best bank shot"
+python3 plan_billiards.py --state .local/billiards/latest.json --confirmed --question "best shot for stripes"
+python3 plan_billiards.py --state .local/billiards/latest.json --confirmed --question "best shot for solids"
+```
+
+`--confirmed` declares that every ball currently on the table is represented in
+the reviewed snapshot. Omitted numbers have no inferred status. The command emits
+strict JSON, including ranked shots
+and diagnostics, and rejects invalid input. It never substitutes an example layout.
+Application code can call `billiards.plan_shots(state, question)` directly; the
+required state is `table` and `balls`, with an optional `group` default target
+filter (default `open`) and optional `planner` settings.
+Each ball contains `id`, `x`, `y`, and optional `confidence` and
+`position_uncertainty_cm`. The command's `--help` shows the schema.
+
+For development, run `python -m pytest -q` with NumPy, OpenCV, and pytest available.
+Tests cover geometry, blockers, pockets, bank legs, conditional scratch paths,
+invalid data, model-label conflicts, stale observations, spoken-command routing,
+JSON replay, and camera-to-overlay integration with synthetic stereo observations.
+They do not replace validation on the actual rig.

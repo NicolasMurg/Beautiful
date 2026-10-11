@@ -7,8 +7,92 @@ to confirm identities and invalidate them when the physical layout changes.
 """
 
 from pathlib import Path
+import re
 
 import numpy as np
+
+
+def _label_key(value):
+    """Normalize label spelling without assuming that a class index is a number."""
+    return " ".join(re.sub(r"[_-]+", " ", str(value).strip().lower()).split())
+
+
+def _ball_label(name):
+    """Return (is_ball, numbered_identity, group) for unambiguous model names.
+
+    Color names alone cannot distinguish solids from stripes. Class indices
+    never imply ball numbers: only the model's actual name or an explicit map
+    may propose an identity.
+    """
+    if name in {"cue ball", "white ball"}:
+        return True, 0, "cue"
+    words = ("zero", "one", "two", "three", "four", "five", "six", "seven",
+             "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen")
+    numbered = re.fullmatch(r"(?:(?:pool |billiard )?ball\s*|(?:solid|stripe|striped)\s*)?"
+                           r"(\d{1,2}|" + "|".join(words) + r")(?:\s*ball)?", name)
+    if numbered:
+        token = numbered.group(1)
+        number = int(token) if token.isdigit() else words.index(token)
+        if 0 <= number <= 15:
+            group = "cue" if number == 0 else "eight" if number == 8 else "solids" if number < 8 else "stripes"
+            # A contradictory class name is not a reliable numbered label.
+            if name.startswith("solid") and group != "solids" or name.startswith("strip") and group != "stripes":
+                return True, None, None
+            return True, number, group
+    if name in {"solid", "solids", "solid ball"}:
+        return True, None, "solids"
+    if name in {"stripe", "stripes", "striped", "striped ball", "stripe ball"}:
+        return True, None, "stripes"
+    generic = {"sports ball", "ball", "pool ball", "billiard ball", "object ball"}
+    colors = {"yellow", "blue", "red", "purple", "orange", "green", "brown", "black", "white"}
+    return name in generic or name.removesuffix(" ball") in colors, None, None
+
+
+def _part_label(name):
+    if name in {"pocket", "hole", "corner pocket", "side pocket", "pool pocket", "billiard pocket"}:
+        return "pocket"
+    if name in {"rail", "cushion", "table rail", "pool rail"}:
+        return "rail"
+    if name in {"table", "pool table", "billiard table", "billiards table"}:
+        return "table"
+    if name in {"cue stick", "pool cue", "billiard cue"}:
+        return "cue_stick"
+    return None
+
+
+def _merge_model_evidence(candidate, proposal):
+    """Keep all overlapping model identities; never let a weaker box overwrite one."""
+    if proposal["source"] != "yolo":
+        return
+    model_id = proposal.get("model_suggested_id")
+    ids = set(candidate.get("model_suggested_ids", []))
+    if model_id is not None:
+        ids.add(int(model_id))
+    groups = set(candidate.get("model_groups", []))
+    if proposal.get("model_group"):
+        groups.add(proposal["model_group"])
+    labels = set(candidate.get("model_labels", []))
+    if proposal.get("model_label"):
+        labels.add(proposal["model_label"])
+    candidate.update(model_suggested_ids=sorted(ids), model_groups=sorted(groups),
+                     model_labels=sorted(labels),
+                     model_confidence=max(candidate.get("model_confidence") or 0, proposal["confidence"]))
+    conflict = len(ids) > 1 or len(groups) > 1
+    candidate["identity_conflict"] = conflict
+    candidate["model_suggested_id"] = next(iter(ids)) if len(ids) == 1 and not conflict else None
+    candidate["group_hint"] = next(iter(groups)) if len(groups) == 1 and not conflict else None
+    if conflict:
+        candidate.update(suggested_id=None, model_identity_confidence=None,
+                         suggestion_source="conflicting_model_labels")
+    elif ids:
+        source = proposal.get("model_label_source", "model_label")
+        if candidate.get("suggestion_source") == "custom_model_label":
+            source = "custom_model_label"
+        identity_score = candidate.get("model_identity_confidence") or 0
+        if model_id is not None:
+            identity_score = max(identity_score, proposal["confidence"])
+        candidate.update(suggested_id=next(iter(ids)), suggestion_source=source,
+                         model_identity_confidence=identity_score)
 
 
 def _frame_and_polygon(frame, polygon):
@@ -108,7 +192,10 @@ class BallDetector:
     ``yolo_model`` may be an existing Ultralytics object or a local weights path.
     A weights path must already exist: this module never implicitly downloads it.
     ``class_to_ball_id`` explicitly maps custom model names/class indices to
-    0..15; even these labels remain unconfirmed suggestions.
+    0..15; even these labels remain unconfirmed suggestions. Names such as
+    ``cue_ball``, ``ball_9`` and ``eight`` work without a map. Mapping keys may
+    be integer indices, normalized names, or JSON numeric strings for indices.
+    Explicit integer keys take precedence over names, then string indices.
     """
 
     def __init__(self, min_radius_px=3, max_radius_px=40, yolo_model=None,
@@ -129,6 +216,20 @@ class BallDetector:
         if any(isinstance(v, bool) or not isinstance(v, (int, np.integer)) or not 0 <= v <= 15
                for v in self.class_to_ball_id.values()):
             raise ValueError("Custom ball IDs must be integers from 0 through 15")
+        normalized = {}
+        for key, value in self.class_to_ball_id.items():
+            if isinstance(key, bool) or not isinstance(key, (str, int, np.integer)):
+                raise ValueError("Custom class keys must be class names or nonnegative indices")
+            if isinstance(key, str):
+                key = _label_key(key)
+                if not key:
+                    raise ValueError("Custom class names must not be empty")
+            elif key < 0:
+                raise ValueError("Custom class indices must not be negative")
+            if key in normalized and normalized[key] != value:
+                raise ValueError("Conflicting mappings for the same normalized class name")
+            normalized[key] = int(value)
+        self.class_to_ball_id = normalized
         if isinstance(yolo_model, (str, Path)):
             model_path = Path(yolo_model)
             if not model_path.is_file():
@@ -137,12 +238,12 @@ class BallDetector:
             yolo_model = YOLO(str(model_path))
         self.yolo_model = yolo_model
 
-    def _yolo_proposals(self, frame):
+    def _yolo_detections(self, frame):
         if self.yolo_model is None:
-            return []
+            return [], []
         results = self.yolo_model.predict(frame, device=self.yolo_device,
                                           conf=self.yolo_conf, imgsz=640, verbose=False)
-        proposals = []
+        proposals, parts = [], []
         for result in results:
             if result.boxes is None:
                 continue
@@ -152,18 +253,47 @@ class BallDetector:
             for box, cls, score in zip(boxes, classes, scores):
                 if len(box) != 4 or not np.isfinite(box).all() or not np.isfinite([cls, score]).all():
                     continue
+                if not self.yolo_conf <= score <= 1 or cls < 0 or cls != int(cls):
+                    continue
                 class_id = int(cls)
-                name = str(result.names[class_id]).strip().lower()
-                custom_id = self.class_to_ball_id.get(class_id, self.class_to_ball_id.get(name))
-                if custom_id is None and name not in {"sports ball", "ball", "pool ball", "billiard ball", "cue ball"}:
+                names = getattr(result, "names", {})
+                try:
+                    name = _label_key(names[class_id])
+                except (KeyError, IndexError, TypeError):
+                    # Explicit index mappings can work even if model metadata is absent.
+                    name = ""
+                custom_id = self.class_to_ball_id.get(class_id, self.class_to_ball_id.get(
+                    name, self.class_to_ball_id.get(str(class_id))))
+                is_ball, canonical_id, group = _ball_label(name)
+                if custom_id is not None:
+                    group = "cue" if custom_id == 0 else "eight" if custom_id == 8 else "solids" if custom_id < 8 else "stripes"
+                role = _part_label(name)
+                if custom_id is None and not is_ball and role is None:
                     continue
                 x1, y1, x2, y2 = box
                 bw, bh = x2 - x1, y2 - y1
-                if min(bw, bh) <= 0 or min(bw, bh) / max(bw, bh) < 0.6:
+                if min(bw, bh) <= 0:
+                    continue
+                height, width = frame.shape[:2]
+                if x1 < 0 or y1 < 0 or x2 > width or y2 > height:
+                    continue
+                if role is not None and custom_id is None:
+                    parts.append(dict(kind=role, pixel={"x": (x1 + x2) / 2, "y": (y1 + y2) / 2},
+                                      box=list(map(float, box)), confidence=float(score),
+                                      model_label=name, model_class_id=class_id,
+                                      source="yolo", geometry_confirmed=False))
+                    continue
+                if min(bw, bh) / max(bw, bh) < 0.6:
                     continue
                 proposals.append({"x": (x1 + x2) / 2, "y": (y1 + y2) / 2,
                                   "r": (bw + bh) / 4, "confidence": float(score),
-                                  "source": "yolo", "model_suggested_id": custom_id})
+                                  "source": "yolo", "model_suggested_id": custom_id if custom_id is not None else canonical_id,
+                                  "model_label": name, "model_class_id": class_id, "model_group": group,
+                                  "model_label_source": "custom_model_label" if custom_id is not None else "model_label"})
+        return proposals, parts
+
+    def _yolo_proposals(self, frame):
+        proposals, _ = self._yolo_detections(frame)
         return proposals
 
     def detect(self, frame, table_polygon):
@@ -172,10 +302,35 @@ class BallDetector:
         Dictionaries contain pixel{x,y}, radius_px, box[x1,y1,x2,y2], confidence,
         source, suggested_id, and identity_confirmed=False. Confidence is a
         proposal-quality score, not a calibrated probability of a correct ball.
+        model_confidence scores any YOLO evidence; model_identity_confidence
+        scores the unambiguous numbered label only (None without one).
+        """
+        return self.detect_scene(frame, table_polygon)["balls"]
+
+    def detect_scene(self, frame, table_polygon):
+        """Return ball candidates and optional unconfirmed YOLO table-part boxes.
+
+        Parts have kind ``pocket``, ``rail``, ``table`` or ``cue_stick``, pixel
+        centers, bounding boxes and model confidence. They are review hints:
+        a pocket box does not establish its measured center, width or blockage.
+        Missing detections never declare a ball pocketed or a pocket open.
         """
         import cv2
 
         frame, polygon = _frame_and_polygon(frame, table_polygon)
+        proposals, parts = self._yolo_detections(frame)
+        visible_parts = []
+        for part in parts:
+            x1, y1, x2, y2 = part["box"]
+            box_polygon = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)
+            area, _ = cv2.intersectConvexConvex(polygon, box_polygon)
+            if area > 0:
+                visible_parts.append(part)
+        return {"balls": self._detect(frame, polygon, proposals), "parts": visible_parts}
+
+    def _detect(self, frame, polygon, proposals):
+        import cv2
+
         height, width = frame.shape[:2]
         table_mask = np.zeros((height, width), np.uint8)
         cv2.fillConvexPoly(table_mask, np.rint(polygon).astype(np.int32), 255)
@@ -186,7 +341,7 @@ class BallDetector:
         contrast = np.linalg.norm(lab - cloth, axis=2)
         foreground = ((contrast >= self.color_contrast) & (table_mask != 0)).astype(np.uint8) * 255
         contours, _ = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        proposals = self._yolo_proposals(frame)
+        proposals = list(proposals)
         for contour in contours:
             area, perimeter = cv2.contourArea(contour), cv2.arcLength(contour, True)
             if area < 8 or perimeter <= 0:
@@ -223,7 +378,10 @@ class BallDetector:
                 continue
             if min(x - radius, y - radius, width - 1 - x - radius, height - 1 - y - radius) < 0:
                 continue
-            if cv2.pointPolygonTest(polygon, (float(x), float(y)), True) < radius * 0.8:
+            # A hanging ball may straddle the calibrated cloth boundary at a
+            # pocket mouth. Keep any center on/inside the polygon; calibrated
+            # cushion geometry and operator review resolve rail false positives.
+            if cv2.pointPolygonTest(polygon, (float(x), float(y)), False) < 0:
                 continue
             x0, x1 = max(0, int(x - radius)), min(width, int(x + radius) + 1)
             y0, y1 = max(0, int(y - radius)), min(height, int(y + radius) + 1)
@@ -238,21 +396,18 @@ class BallDetector:
                               if np.hypot(candidate["pixel"]["x"] - x, candidate["pixel"]["y"] - y)
                               < max(candidate["radius_px"], radius) * 0.8), None)
             if duplicate is not None:
-                custom_id = proposal.get("model_suggested_id")
-                if custom_id is not None:
-                    duplicate.update(suggested_id=int(custom_id), suggestion_source="custom_model_label")
+                _merge_model_evidence(duplicate, proposal)
                 continue
             appearance = _appearance(frame, x, y, radius)
-            custom_id = proposal.get("model_suggested_id")
-            suggestion_source = "appearance"
-            if custom_id is not None:
-                appearance["suggested_id"] = int(custom_id)
-                suggestion_source = "custom_model_label"
-            candidates.append(dict(pixel={"x": float(x), "y": float(y)},
-                                   radius_px=float(radius),
-                                   box=[x0, y0, x1, y1], confidence=proposal["confidence"],
-                                   source=proposal["source"], identity_confirmed=False,
-                                   suggestion_source=suggestion_source, **appearance))
+            candidate = dict(pixel={"x": float(x), "y": float(y)}, radius_px=float(radius),
+                             box=[x0, y0, x1, y1], confidence=proposal["confidence"],
+                             source=proposal["source"], identity_confirmed=False,
+                             model_suggested_id=None, model_suggested_ids=[], model_labels=[],
+                             model_groups=[], model_confidence=None, model_identity_confidence=None,
+                             identity_conflict=False,
+                             group_hint=None, suggestion_source="appearance", **appearance)
+            _merge_model_evidence(candidate, proposal)
+            candidates.append(candidate)
         return sorted(candidates, key=lambda candidate: (candidate["pixel"]["y"], candidate["pixel"]["x"]))
 
 

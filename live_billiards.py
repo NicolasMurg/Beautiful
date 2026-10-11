@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """Physical pool-shot adviser using the project's calibrated stereo cameras.
 
-Run --help or read BILLIARDS.md. No virtual ball layouts, cloud service, or motor
-commands. Ball identities and the complete stationary layout are reviewed before
-any guidance. Shot scores describe ideal direct-pot geometry, not make odds.
+Run --help or read BILLIARDS.md. The virtual table is reconstructed from measured
+camera observations. Ball identities and the complete stationary layout are reviewed before
+any guidance. Shot scores rank modeled direct and bank shots, not make odds.
 """
 
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import queue
 import shutil
 import subprocess
 import sys
 import textwrap
+import tempfile
 import threading
 import time
 
 import numpy as np
 
-from billiards import BALLS, GROUPS
+from billiards import BALLS, GROUPS, normalize_pockets
 from billiards_session import PoolSession
 from billiards_table import TableCalibration
 from billiards_vision import BallDetector
@@ -39,6 +41,41 @@ def calibration_signature(path, estimator, baseline_m):
     return {"stereo_sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
             "baseline_m": float(baseline_m), "image_size": list(estimator.image_size),
             "camera_matrix": estimator.rectified_camera_matrix.tolist()}
+
+
+def read_json_option(path, expected_type, description):
+    if path is None:
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot read {description}: {exc}") from exc
+    if not isinstance(value, expected_type):
+        raise ValueError(f"{description} must contain a JSON {expected_type.__name__}.")
+    return value
+
+
+def export_reviewed_state(session, path):
+    """Write an explicitly reviewed observation for offline replay, atomically."""
+    if not session.confirmed:
+        raise ValueError("Confirm the complete observed layout before exporting it.")
+    state = session.state()
+    state["observation"] = {"source": "physical_calibrated_stereo", "reviewed": True,
+                            "recorded_unix_s": time.time()}
+    state["virtual_map"] = session.virtual_map()
+    content = json.dumps(state, indent=2, allow_nan=False) + "\n"
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp", delete=False) as stream:
+            temp_name = stream.name
+            stream.write(content)
+        os.replace(temp_name, path)
+    finally:
+        if temp_name is not None and os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
 class LocalSpeaker:
@@ -89,8 +126,9 @@ def terminal_commands():
 
 
 def render(frame, session, selected=None, entry="", entry_mode=None,
-           notice="", calibration_points=(), calibrating=False, voice_status=""):
-    """Draw observations and computed guidance on the actual rectified frame."""
+           notice="", calibration_points=(), calibrating=False, voice_status="",
+           map_view=False):
+    """Draw camera observations or their measured overhead map, plus guidance."""
     import cv2
     h, w = frame.shape[:2]
     panel_width = 530
@@ -106,10 +144,24 @@ def render(frame, session, selected=None, entry="", entry_mode=None,
         u, v = session.calibration.project(x, y, height_cm=height)
         return int(round(u)), int(round(v))
 
-    if session is not None:
+    if session is not None and not (map_view and not calibrating):
         table = session.calibration.table
+        pockets = {p["id"]: p for p in normalize_pockets(table)}
+        for pocket_id, blocked in session.pocket_overrides.items():
+            pockets[pocket_id]["blocked"] = blocked
         poly = np.rint(session.calibration.polygon).astype(np.int32)
         cv2.polylines(view, [poly], True, (130, 200, 130), 1, cv2.LINE_AA)
+        for pocket in pockets.values():
+            p = point(pocket["x"], pocket["y"])
+            color = (70, 80, 250) if pocket["blocked"] else (170, 210, 245)
+            cv2.circle(view, p, 6, color, 2)
+            text(pocket["id"] + (" X" if pocket["blocked"] else ""), p[0]+8, p[1]+12, color, 0.4)
+        for part in session.parts:
+            if part["kind"] == "table":
+                continue
+            x1, y1, x2, y2 = [int(round(v)) for v in part["box"]]
+            cv2.rectangle(view, (x1, y1), (x2, y2), (180, 150, 120), 1)
+            text(f"YOLO {part['kind']}?", x1, y1-4, (180, 150, 120), 0.35)
         # The reference numbers refer to the table coordinate system established
         # by TL/TR/BR/BL calibration, not the user's changing viewing direction.
         for i in range(1, 8):
@@ -142,8 +194,9 @@ def render(frame, session, selected=None, entry="", entry_mode=None,
             r = table["ball_radius"]
             for path, color in ((shot["cue_path"], (255, 220, 80)),
                                 (shot["object_path"], (70, 245, 150))):
-                a, b = [point(p["x"], p["y"], r) for p in path]
-                cv2.arrowedLine(view, a, b, color, 2, cv2.LINE_AA, tipLength=0.08)
+                projected = [point(p["x"], p["y"], r) for p in path]
+                for a, b in zip(projected, projected[1:]):
+                    cv2.arrowedLine(view, a, b, color, 2, cv2.LINE_AA, tipLength=0.08)
             ghost = shot["ghost"]
             gp = point(ghost["x"], ghost["y"], r)
             # Project a sampled circle in the ball-center plane to preserve the
@@ -158,9 +211,21 @@ def render(frame, session, selected=None, entry="", entry_mode=None,
                 b = tuple(round(gp[j] + (rp[j]-gp[j])*min(1, t+.045)) for j in (0, 1))
                 cv2.line(view, a, b, (170, 160, 130), 1, cv2.LINE_AA)
             cv2.drawMarker(view, rp, (255, 220, 80), cv2.MARKER_DIAMOND, 12, 2)
+            continuation = shot.get("scratch_risk", {}).get("cue_path", [])
+            for start, end in zip(continuation, continuation[1:]):
+                a, b = point(start["x"], start["y"], r), point(end["x"], end["y"], r)
+                for t in np.arange(0, 1, 0.1):
+                    p = tuple(round(a[j] + (b[j]-a[j])*t) for j in (0, 1))
+                    q = tuple(round(a[j] + (b[j]-a[j])*min(1, t+.05)) for j in (0, 1))
+                    cv2.line(view, p, q, (220, 140, 230), 1, cv2.LINE_AA)
     for i, p in enumerate(calibration_points):
         cv2.drawMarker(view, (round(p[0]), round(p[1])), (0, 240, 255), cv2.MARKER_CROSS, 15, 2)
         text(("TL", "TR", "BR", "BL")[i], p[0]+8, p[1]-8, (0, 240, 255))
+
+    if map_view and not calibrating:
+        from billiards_map_view import draw_table_map
+        canvas[:h, :w] = draw_table_map(w, h, session.virtual_map() if session else None,
+                                       shot=session.shot if session else None, selected=selected)
 
     x, y = w + 18, 30
 
@@ -179,29 +244,46 @@ def render(frame, session, selected=None, entry="", entry_mode=None,
         paragraph("Table dimensions are between cushion faces. Markers define the top/right directions used in all guidance.")
         paragraph("Backspace undoes a point. T restarts calibration.")
     elif session:
-        paragraph(f"Group: {session.group.upper()} | " + ("CONFIRMED" if session.confirmed else "REVIEW REQUIRED"))
+        paragraph(f"Default target filter: {session.group.upper()} | "
+                  + ("CONFIRMED" if session.confirmed else "REVIEW REQUIRED"))
+        if session.plan:
+            target_id = session.plan.get("target_filter", {}).get("ball_id")
+            target_label = f"BALL {target_id}" if target_id is not None else session.plan["group"].upper()
+            paragraph(f"This request: {target_label}")
         paragraph(session.message, (30, 210, 250))
         if selected is not None and session.snapshot is not None:
             try:
                 candidate = session.candidate(selected)
                 guess = candidate.get("suggested_id")
                 suggestion = BALLS[guess]["name"] if guess in BALLS else "none"
-                paragraph(f"Selected #{selected}. Appearance suggestion: {suggestion}. Type actual number + ENTER.")
+                paragraph(f"Selected #{selected}. Identity suggestion: {suggestion}. Type actual number + ENTER.")
                 if "position" in candidate:
                     pos = candidate["position"]
-                    paragraph(f"Stereo Z {pos['depth_m']:.3f} m | table ({pos['x']:.1f}, {pos['y']:.1f}) cm")
+                    paragraph(f"Stereo Z {pos['depth_m']:.3f} m | table ({pos['x']:.1f}, {pos['y']:.1f}) cm"
+                              + (f" | uncertainty {pos['position_uncertainty_cm']:.2f} cm"
+                                 if "position_uncertainty_cm" in pos else ""))
                 if "error" in candidate:
                     paragraph(candidate["error"], (70, 80, 250))
             except ValueError:
                 pass
         if session.shot:
             shot = session.shot
-            paragraph(f"Option {session.shot_index + 1}/{len(session.plan['shots'])}: {shot['ball_name']} -> {shot['pocket_name']}",
+            paragraph(f"Option {session.shot_index + 1}/{len(session.plan['shots'])}: {shot.get('shot_type', 'direct').upper()} {shot['ball_name']} -> {shot['pocket_name']}",
                       (90, 230, 180))
             paragraph(f"Cut angle: {shot['cut_angle_deg']:.1f} degrees. Aim heading: {shot['aim_angle_deg']:.1f} degrees clockwise from table-right.")
-            paragraph(shot["rail"]["description"])
-            paragraph("Aim the cue-ball CENTER toward the outlined ghost ball. Cyan: cue path. Green: object-ball path.")
-            paragraph("Ideal direct pot; spin, strength and post-impact scratch risk are not predicted.", (160, 170, 180))
+            if shot.get("bank"):
+                paragraph(f"Bank off the {shot['bank']['rail']} cushion at the bend in the green path.")
+            else:
+                paragraph(shot["rail"]["description"])
+            paragraph("Aim the cue-ball CENTER toward the outlined ghost ball. Cyan: cue path. Green: object-ball path. Purple dashes: conditional stun continuation.")
+            paragraph(f"Ranking score: {shot['score']:.1f}/100 (not make odds).")
+            if shot.get("scratch_risk"):
+                risk = shot["scratch_risk"]
+                paragraph(f"Scratch estimate: {risk.get('level', 'unknown')}. "
+                          + risk.get("warning", "Ideal stun only; actual spin and speed change the path."),
+                          (160, 170, 180))
+            if shot.get("power"):
+                paragraph(f"Suggested pace: {shot['power']['level']}; tune on your cloth.")
     if notice:
         paragraph(notice, (90, 175, 255))
     if voice_status:
@@ -210,9 +292,9 @@ def render(frame, session, selected=None, entry="", entry_mode=None,
         paragraph(("Question: " if entry_mode == "question" else "Ball number: ") + entry + "_", (255, 255, 255))
 
     controls = ["SPACE scan | Click ball + number + ENTER | SHIFT-click add missed ball",
-                "Right-click ignore false detection | DELETE clear label | C confirm layout",
-                "A best shot | ? type question | P voice | G group | N alternative | T calibrate | Q quit",
-                "C confirms ALL on-table balls are labeled; missing numbers are declared pocketed."]
+                "Right-click ignore | DELETE clear label | L copy model labels | C confirm layout",
+                "A shot | ? question | P voice | G default filter | N alternative | M camera/map | T calibrate | Q quit",
+                "C confirms the complete current layout. Ask 'best shot for solids' or 'best shot for stripes'."]
     for i, line in enumerate(controls):
         text(line, 10, h + 23 + i*22, (195, 205, 215), 0.39)
     return canvas
@@ -232,8 +314,20 @@ def build_parser():
     parser.add_argument("--pocket-width-cm", type=float, help="Smallest measured pocket opening; idealized planner")
     parser.add_argument("--ball-diameter-cm", type=float, default=5.715)
     parser.add_argument("--marker-inset-cm", type=float, default=10.0)
-    parser.add_argument("--group", choices=GROUPS, default="solids")
+    parser.add_argument("--group", choices=GROUPS, default="open",
+                        help="Default target filter; each shot request can specify solids or stripes")
     parser.add_argument("--model", type=Path, help="Optional YOLO weights for ball proposals; OpenCV also runs")
+    parser.add_argument("--class-map", type=Path, help="JSON object mapping YOLO class names/indices to ball IDs 0..15")
+    parser.add_argument("--yolo-confidence", type=float, default=0.20)
+    parser.add_argument("--pockets-config", type=Path, help="JSON list of measured pocket overrides (id, x, y, width, blocked)")
+    parser.add_argument("--direct-only", action="store_true", help="Disable one-cushion bank candidates")
+    parser.add_argument("--planner-config", type=Path, help="JSON object with measured cloth/cushion parameters and planner limits")
+    parser.add_argument("--position-margin-cm", type=float,
+                        help="Extra position uncertainty beyond measured localization uncertainty")
+    parser.add_argument("--export-state", type=Path,
+                        help="Save reviewed layouts as JSON after C, e.g. .local/billiards/latest.json")
+    parser.add_argument("--map-view", action="store_true",
+                        help="Start with the measured overhead map; M toggles camera/map view")
     parser.add_argument("--device", default="0", help="YOLO device, e.g. 0 or cpu")
     parser.add_argument("--min-ball-radius-px", type=int, default=3)
     parser.add_argument("--max-ball-radius-px", type=int, default=40)
@@ -260,6 +354,10 @@ def main():
         parser.error("Baseline and ball diameter must be finite and positive.")
     if not np.isfinite(args.marker_inset_cm) or args.marker_inset_cm <= 0:
         parser.error("Marker inset must be finite and positive.")
+    if args.position_margin_cm is not None and (not np.isfinite(args.position_margin_cm) or args.position_margin_cm < 0):
+        parser.error("Position margin must be finite and nonnegative.")
+    if args.class_map is not None and args.model is None:
+        parser.error("--class-map requires --model.")
     if all(v is not None for v in dimensions):
         if not all(np.isfinite(v) and v > 0 for v in dimensions):
             parser.error("Table and pocket dimensions must be finite and positive.")
@@ -271,23 +369,35 @@ def main():
                                          args.stereo_disparities)
         signature = calibration_signature(args.stereo_calibration, estimator, args.baseline_inches * 0.0254)
         yolo = None
+        class_map = read_json_option(args.class_map, dict, "class map")
+        pocket_config = read_json_option(args.pockets_config, list, "pocket configuration")
+        planner_options = read_json_option(args.planner_config, dict, "planner configuration") or {}
+        if args.direct_only:
+            planner_options["allow_banks"] = False
+        if args.position_margin_cm is not None:
+            planner_options["position_uncertainty_cm"] = args.position_margin_cm
         if args.model:
             from ultralytics import YOLO
             yolo = YOLO(str(args.model))
         detector = BallDetector(args.min_ball_radius_px, args.max_ball_radius_px,
-                                yolo_model=yolo, yolo_device=args.device)
+                                yolo_model=yolo, yolo_device=args.device,
+                                yolo_conf=args.yolo_confidence, class_to_ball_id=class_map)
         calibration, session = None, None
         notice = ""
         # Explicit dimensions start a new physical table calibration. A saved
         # profile is used only when the user omits these measurement arguments.
         if args.table_profile.is_file() and not all(v is not None for v in dimensions):
             calibration = TableCalibration.load(args.table_profile, signature=signature)
-            session = PoolSession(calibration, detector, args.group)
+            if pocket_config is not None:
+                calibration.set_pockets(pocket_config)
+                calibration.save(args.table_profile)
+            session = PoolSession(calibration, detector, args.group, planner_options=planner_options)
             args.table_length_cm = calibration.width_cm
             args.table_width_cm = calibration.height_cm
             args.pocket_width_cm = calibration.pocket_width_cm
             args.ball_diameter_cm = calibration.ball_radius_cm * 2
             args.marker_inset_cm = calibration.inset_cm
+            pocket_config = calibration.pockets or None
         if args.voice:
             from speech import worker_from_args
             try:
@@ -308,9 +418,12 @@ def main():
         commands = terminal_commands()
         print("Physical pool coach: keep the complete table visible and the rig fixed.\n"
               "See BILLIARDS.md for marker placement. SPACE scans; label every ball; C confirms.\n"
+              "Measured table geometry defines six pocket positions; pocket recognition is not required.\n"
               "Type a question here or press ? in the camera window. A asks immediately.\n"
-              "Missing detections never mean pocketed until you explicitly confirm the layout.", flush=True)
+              "Ask 'best shot for solids' or 'best shot for stripes' for this layout.\n"
+              "Confirmation reviews the complete current layout; absent balls have no assigned status.", flush=True)
         selected, entry, entry_mode = None, "", None
+        map_view = args.map_view
         speech_revision = None
         quit_requested = False
         width, height = estimator.image_size
@@ -340,7 +453,8 @@ def main():
                     notice = f"Asked: {question}"
                     print(json.dumps({"question": question, "source": "physical_calibrated_stereo",
                                       "result": result}, allow_nan=False), flush=True)
-                    speaker.say(session.shot["instruction"] if session.shot else result["message"])
+                    speaker.say(result.get("response") or
+                                (session.shot["instruction"] if session.shot else result["message"]))
                     spoken_revision = (id(session), session.revision)
 
                 while not events.empty():
@@ -362,14 +476,18 @@ def main():
                                     width_cm=args.table_length_cm, height_cm=args.table_width_cm,
                                     ball_radius_cm=args.ball_diameter_cm/2,
                                     pocket_width_cm=args.pocket_width_cm, inset_cm=args.marker_inset_cm,
-                                    signature=signature)
+                                    signature=signature, pockets=pocket_config)
                                 calibration.save(args.table_profile)
-                                session = PoolSession(calibration, detector, args.group)
+                                session = PoolSession(calibration, detector, args.group,
+                                                      planner_options=planner_options)
                                 calibrating = False
                                 calibration_points = []
                                 notice = "Table calibrated. Remove markers if desired; wait, then SPACE to scan."
                                 print(notice, flush=True)
                         elif session is not None:
+                            if map_view:
+                                notice = "M returns to the camera view for labeling or marking actual balls."
+                                continue
                             if flags & cv2.EVENT_FLAG_SHIFTKEY and event == cv2.EVENT_LBUTTONDOWN:
                                 candidate = session.add_at_pixel(x, y)
                                 selected = candidate["key"]
@@ -423,7 +541,7 @@ def main():
 
                 cv2.imshow(WINDOW, render(left_rect, session, selected, entry, entry_mode,
                                           notice, calibration_points, calibrating,
-                                          worker.status if worker else ""))
+                                          worker.status if worker else "", map_view=map_view))
                 raw_key = cv2.waitKeyEx(1)
                 if raw_key < 0:
                     continue
@@ -466,13 +584,21 @@ def main():
                         if key in (8, 127) and calibration_points:
                             calibration_points.pop()
                     elif session is not None:
-                        if key == ord(" "):
+                        if key in (ord("m"), ord("M")):
+                            map_view = not map_view
+                            notice = "Measured overhead map." if map_view else "Live camera view."
+                        elif key == ord(" "):
                             session.scan(left_rect, depth)
                             selected, entry_mode = None, None
                             notice = "Click each real ball and type its number; 0 = cue ball."
                         elif key in (ord("c"), ord("C")):
                             session.confirm()
-                            notice = "You confirmed every on-table ball is represented; omitted numbers are pocketed."
+                            if args.export_state is not None:
+                                export_reviewed_state(session, args.export_state)
+                            notice = "You confirmed every on-table ball is represented in the current layout."
+                        elif key in (ord("l"), ord("L")):
+                            session.accept_model_labels()
+                            notice = session.message
                         elif key in (ord("a"), ord("A")):
                             ask("What is my best shot?")
                         elif key == ord("?"):

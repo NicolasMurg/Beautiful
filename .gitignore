@@ -4,6 +4,7 @@ HACKATHON CONTEXT.txt
 
 # Private project context (local only)
 PROJECT_CONTEXT.md
+/AGENTS.md
 message (3).txt
 reference_bottle.json
 __pycache__/

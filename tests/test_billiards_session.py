@@ -256,9 +256,13 @@ class PoolSessionTests(unittest.TestCase):
         session.assign("2", 8)
         with self.assertRaisesRegex(ValueError, "press C"):
             session.ask(now=later)
-        # Only an explicit declaration that this scan is complete permits the 8.
+        # Review confirms the physical snapshot, never a game's progress.
         session.confirm()
-        self.assertEqual(session.ask(now=later)["eligible_ball_ids"], [8])
+        self.assertNotIn("pocketed", session.message.lower())
+        self.assertEqual(session.ask("best solids", now=later)["eligible_ball_ids"], [])
+        self.assertEqual(session.ask("best stripes", now=later)["eligible_ball_ids"], [])
+        self.assertEqual(session.ask(now=later)["eligible_ball_ids"], [])
+        self.assertEqual(session.ask("shoot the 8 ball", now=later)["eligible_ball_ids"], [8])
 
     def test_bad_depth_requires_fix_or_reject_before_confirming(self):
         session = PoolSession(FakeCalibration(), FakeDetector())
@@ -305,6 +309,151 @@ class PoolSessionTests(unittest.TestCase):
             session.scan(moved, np.ones(moved.shape[:2]), now=now)
         self.assertFalse(session.confirmed)
         self.assertIsNone(session.snapshot)
+
+
+class ExtendedRecommendationTests(unittest.TestCase):
+    def test_stripes_then_solids_use_same_snapshot_without_remembering_a_player(self):
+        session, _, now = scanned_session([
+            candidate(127, 100, 0), candidate(100, 50, 1), candidate(160, 50, 9),
+        ])
+        for key, number in (("1", 0), ("2", 1), ("3", 9)):
+            session.assign(key, number)
+        session.confirm()
+        original_map = session.virtual_map()
+        original_snapshot = session.snapshot
+
+        stripes = session.ask("best stripes", now=now)
+        solids = session.ask("best solids", now=now)
+        unfiltered = session.ask(now=now)
+
+        self.assertEqual(stripes["eligible_ball_ids"], [9])
+        self.assertEqual(solids["eligible_ball_ids"], [1])
+        self.assertEqual(unfiltered["eligible_ball_ids"], [1, 9])
+        self.assertEqual(session.group, "open")
+        self.assertEqual(session.state()["group"], "open")
+        # Both groups remain in the map as physical obstacles for every request.
+        self.assertEqual(session.virtual_map(), original_map)
+        self.assertIs(session.snapshot, original_snapshot)
+        self.assertTrue(session.confirmed)
+        self.assertNotIn("pocketed", session.message.lower())
+
+    def test_explicit_default_target_filter_survives_a_different_spoken_request(self):
+        session, _, now = scanned_session([
+            candidate(127, 100, 0), candidate(100, 50, 1), candidate(160, 50, 9),
+        ])
+        for key, number in (("1", 0), ("2", 1), ("3", 9)):
+            session.assign(key, number)
+        session.confirm()
+        session.set_group("stripes")
+        self.assertIn("Target filter", session.message)
+        self.assertEqual(session.ask("best solids", now=now)["eligible_ball_ids"], [1])
+        self.assertEqual(session.group, "stripes")
+        self.assertEqual(session.ask(now=now)["eligible_ball_ids"], [9])
+
+    def test_unreviewed_map_keeps_measured_objects_without_inventing_ball_identities(self):
+        session, _, _ = scanned_session()
+        mapped = session.virtual_map()
+        self.assertEqual(mapped["status"], "review")
+        self.assertEqual([(b["x"], b["y"]) for b in mapped["balls"]], [(127., 100.), (127., 50.)])
+        self.assertTrue(all(b["id"] is None for b in mapped["balls"]))
+        self.assertNotIn("pocketed_ball_ids", mapped)
+        self.assertFalse(mapped["complete"])
+
+    def test_failed_measurement_remains_an_unresolved_map_object(self):
+        session, _, _ = scanned_session()
+        session.candidates[0].pop("position")
+        session.candidates[0]["error"] = "No stereo depth"
+        mapped = session.virtual_map()
+        self.assertEqual(mapped["status"], "invalid")
+        self.assertEqual(mapped["unmapped"], [{"key": "1", "reason": "No stereo depth"}])
+        self.assertEqual(len(mapped["balls"]), 1)
+        self.assertNotIn("pocketed_ball_ids", mapped)
+        with self.assertRaisesRegex(ValueError, "No stereo depth"):
+            session.confirm()
+
+    def test_quality_and_planner_settings_reach_the_planner_without_mutating_calibration(self):
+        session, _, now = confirmed_session()
+        session.candidates[0]["confidence"] = 0.72
+        session.candidates[0]["position"]["position_uncertainty_cm"] = 0.2
+        session.planner_options = {"allow_banks": False, "position_uncertainty_cm": 0.1}
+        session.set_pocket_blocked("TM", True)
+        state = session.state()
+        self.assertEqual(state["balls"][0]["confidence"], 0.72)
+        self.assertEqual(state["balls"][0]["position_uncertainty_cm"], 0.2)
+        self.assertEqual(state["planner"]["position_uncertainty_cm"], 0.1)
+        self.assertNotIn("pockets", session.calibration.table)
+        result = session.ask(now=now)
+        self.assertTrue(next(p for p in result["pockets"] if p["id"] == "TM")["blocked"])
+        self.assertTrue(all(s["pocket_id"] != "TM" for s in result["shots"]))
+
+    def test_block_and_unblock_spoken_pocket_commands_replan(self):
+        session, _, now = confirmed_session()
+        blocked = session.ask("Block the top middle pocket.", now=now)
+        self.assertTrue(all(s["pocket_id"] != "TM" for s in blocked["shots"]))
+        reopened = session.ask("Unblock TM", now=now)
+        self.assertTrue(any(s["pocket_id"] == "TM" for s in reopened["shots"]))
+        self.assertFalse(session.pocket_overrides["TM"])
+
+    def test_alternatives_explanations_and_direct_mode_share_the_current_layout(self):
+        session, _, now = confirmed_session()
+        revision = session.revision
+        result = session.ask("Next shot", now=now)
+        self.assertEqual(result["response"], session.shot["instruction"])
+        self.assertGreater(session.revision, revision)
+        explanation = session.ask("Why this shot?", now=now)
+        self.assertIn(session.shot["reasons"][0], explanation["response"])
+        result = session.ask("Direct shots only", now=now)
+        self.assertTrue(all(s["shot_type"] == "direct" for s in result["shots"]))
+        self.assertFalse(session.planner_options["allow_banks"])
+        result = session.ask("Allow bank shots", now=now)
+        self.assertTrue(session.planner_options["allow_banks"])
+
+    def test_old_or_unreviewed_layout_cannot_be_reused_by_voice_controls(self):
+        for command in ("Next shot", "Why this shot?", "Block TM", "Direct shots only"):
+            with self.subTest(command=command):
+                session, _, now = confirmed_session()
+                with self.assertRaisesRegex(ValueError, "stale"):
+                    session.ask(command, now=now + 4)
+                self.assertIsNone(session.shot)
+                session, _, now = scanned_session()
+                with self.assertRaisesRegex(ValueError, "press C"):
+                    session.ask(command, now=now)
+
+    def test_copying_model_labels_requires_explicit_confirmation(self):
+        session, _, now = scanned_session()
+        for candidate, number in zip(session.candidates, (0, 1)):
+            candidate["model_suggested_id"] = number
+        self.assertEqual(session.accept_model_labels(), 2)
+        self.assertFalse(session.confirmed)
+        with self.assertRaisesRegex(ValueError, "press C"):
+            session.ask(now=now)
+        session.confirm()
+        self.assertEqual(session.ask(now=now)["eligible_ball_ids"], [1])
+
+    def test_copying_model_labels_skips_duplicates_conflicts_and_appearance_only(self):
+        session, _, _ = scanned_session()
+        self.assertEqual(session.accept_model_labels(), 0)  # Color suggestions are not model IDs.
+        for item in session.candidates:
+            item["model_suggested_id"] = 1
+        self.assertEqual(session.accept_model_labels(), 0)
+        session.candidates[0]["model_suggested_id"] = 0
+        session.candidates[0]["identity_conflict"] = True
+        self.assertEqual(session.accept_model_labels(), 1)
+        self.assertNotIn("1", session.labels)
+        self.assertEqual(session.labels["2"], 1)
+
+    def test_depth_uncertainty_increase_clears_advice_even_without_position_shift(self):
+        session, frame, now = confirmed_session()
+        localize = session.calibration.localize_ball
+
+        def worsened(*args):
+            return dict(localize(*args), position_uncertainty_cm=2.0)
+
+        session.calibration.localize_ball = worsened
+        session.observe(frame, now + 0.1, now=now + 0.1, depth_map=np.ones(frame.shape[:2]))
+        self.assertFalse(session.confirmed)
+        self.assertIsNone(session.shot)
+        self.assertIn("uncertainty", session.message)
 
 
 if __name__ == "__main__":
